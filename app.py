@@ -58,8 +58,10 @@ class RoundedButton(tk.Canvas):
         self.fg = fg
         self.radius = radius
         self.font = font
+        self.is_pressed = False
         self.draw()
-        self.bind("<Button-1>", lambda _event: self.command())
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
         self.bind("<Enter>", self.on_enter)
         self.bind("<Leave>", self.on_leave)
 
@@ -75,8 +77,20 @@ class RoundedButton(tk.Canvas):
         self.draw()
 
     def on_leave(self, _event: tk.Event) -> None:
+        self.is_pressed = False
         self.fill = self.normal_fill
         self.draw()
+
+    def on_press(self, _event: tk.Event) -> None:
+        self.is_pressed = True
+
+    def on_release(self, event: tk.Event) -> None:
+        if not self.is_pressed:
+            return
+        self.is_pressed = False
+        target = self.winfo_containing(event.x_root, event.y_root)
+        if target is self:
+            self.command()
 
     def create_round_rect(self, x1, y1, x2, y2, radius, **kwargs) -> int:
         points = [
@@ -159,7 +173,8 @@ class TaskCard(tk.Canvas):
         if self.dragging:
             self.drag_end(self.task.id)
             return
-        self.open_command(self.task.id)
+        if self.winfo_containing(event.x_root, event.y_root) is self:
+            self.open_command(self.task.id)
 
     def draw(self) -> None:
         self.delete("all")
@@ -310,7 +325,7 @@ class CalendarPopup(tk.Toplevel):
                     font=("Microsoft YaHei UI", 9, "bold" if day == self.selected else "normal"),
                 )
                 button.grid(row=row_index, column=column_index, padx=2, pady=2)
-                button.bind("<Button-1>", lambda _event, value=day: self.choose(value))
+                button.bind("<ButtonRelease-1>", lambda _event, value=day: self.choose(value))
 
     def prev_month(self) -> None:
         if self.view_month == 1:
@@ -477,6 +492,8 @@ class DailyMemoApp(tk.Tk):
         self.task_cards: dict[int, TaskCard] = {}
         self.tasks: list[Task] = []
         self.drag_task_id: int | None = None
+        self.drag_preview: tk.Toplevel | None = None
+        self.drag_preview_canvas: tk.Canvas | None = None
 
         self.title("每日备忘录与任务管理")
         self.geometry("920x680")
@@ -518,7 +535,7 @@ class DailyMemoApp(tk.Tk):
 
         self.date_button = tk.Frame(header, bg="#ffffff", cursor="hand2", padx=16, pady=9)
         self.date_button.grid(row=0, column=2, sticky="e")
-        self.date_button.bind("<Button-1>", lambda _event: self.toggle_calendar())
+        self.date_button.bind("<ButtonRelease-1>", lambda _event: self.toggle_calendar())
         tk.Label(
             self.date_button,
             text="📅",
@@ -537,7 +554,7 @@ class DailyMemoApp(tk.Tk):
         )
         self.date_label.pack(side="left")
         for child in self.date_button.winfo_children():
-            child.bind("<Button-1>", lambda _event: self.toggle_calendar())
+            child.bind("<ButtonRelease-1>", lambda _event: self.toggle_calendar())
 
         content = tk.Frame(self, bg="#eef2f7", padx=26, pady=0)
         content.grid(row=1, column=0, sticky="nsew")
@@ -580,8 +597,8 @@ class DailyMemoApp(tk.Tk):
 
         self.canvas.bind("<Configure>", self.on_canvas_resize)
         self.cards_frame.bind("<Configure>", self.update_scroll_region)
-        self.canvas.bind("<Button-1>", self.on_empty_area_click)
-        self.cards_frame.bind("<Button-1>", self.on_empty_area_click)
+        self.canvas.bind("<ButtonRelease-1>", self.on_empty_area_click)
+        self.cards_frame.bind("<ButtonRelease-1>", self.on_empty_area_click)
         self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
 
         footer = tk.Frame(self, bg="#eef2f7", padx=26, pady=0)
@@ -649,9 +666,9 @@ class DailyMemoApp(tk.Tk):
             font=("Microsoft YaHei UI", 10),
             cursor="hand2",
         ).grid(row=2, column=0)
-        empty.bind("<Button-1>", lambda _event: self.open_new_task())
+        empty.bind("<ButtonRelease-1>", lambda _event: self.open_new_task())
         for child in empty.winfo_children():
-            child.bind("<Button-1>", lambda _event: self.open_new_task())
+            child.bind("<ButtonRelease-1>", lambda _event: self.open_new_task())
 
     def render_task_card(self, task: Task, index: int) -> None:
         palette = [
@@ -683,6 +700,7 @@ class DailyMemoApp(tk.Tk):
     def drag_task(self, task_id: int, y_root: int) -> None:
         if self.drag_task_id != task_id or len(self.tasks) < 2:
             return
+        self.update_drag_preview(task_id, y_root)
 
         current_index = next(
             (index for index, task in enumerate(self.tasks) if task.id == task_id),
@@ -711,6 +729,8 @@ class DailyMemoApp(tk.Tk):
         card = self.task_cards.get(task_id)
         if card:
             card.configure(cursor="hand2")
+            card.draw()
+        self.destroy_drag_preview()
         self.drag_task_id = None
         self.db.reorder_tasks(self.current_date_text, [task.id for task in self.tasks])
         self.status_label.configure(text="代办顺序已更新")
@@ -721,6 +741,146 @@ class DailyMemoApp(tk.Tk):
             if card:
                 card.grid_configure(row=index)
         self.update_scroll_region()
+
+    def update_drag_preview(self, task_id: int, y_root: int) -> None:
+        card = self.task_cards.get(task_id)
+        task = next((item for item in self.tasks if item.id == task_id), None)
+        if not card or not task:
+            return
+
+        if not self.drag_preview or not self.drag_preview.winfo_exists():
+            self.create_drag_preview(task, card)
+            card.create_rectangle(
+                2,
+                2,
+                max(card.winfo_width(), 300) - 2,
+                80,
+                fill="#ffffff",
+                outline="",
+                stipple="gray50",
+                tags="drag_mask",
+            )
+        x = card.winfo_rootx()
+        y = y_root - max(card.winfo_height() // 2, 40)
+        self.drag_preview.geometry(f"+{x}+{y}")
+
+    def create_drag_preview(self, task: Task, source_card: TaskCard) -> None:
+        width = max(source_card.winfo_width(), 300)
+        height = max(source_card.winfo_height(), 82)
+        preview = tk.Toplevel(self)
+        preview.overrideredirect(True)
+        preview.attributes("-topmost", True)
+        try:
+            preview.attributes("-alpha", 0.68)
+        except tk.TclError:
+            pass
+        preview.configure(bg="#ffffff")
+
+        canvas = tk.Canvas(
+            preview,
+            width=width,
+            height=height,
+            bg="#ffffff",
+            highlightthickness=0,
+        )
+        canvas.pack()
+        self.draw_preview_card(canvas, task, source_card.card_bg, source_card.accent, width)
+        self.drag_preview = preview
+        self.drag_preview_canvas = canvas
+
+    def draw_preview_card(
+        self,
+        canvas: tk.Canvas,
+        task: Task,
+        card_bg: str,
+        accent: str,
+        width: int,
+    ) -> None:
+        canvas.delete("all")
+        fill = "#f2f4f7" if task.is_done else card_bg
+        accent_fill = "#c7cdd8" if task.is_done else accent
+        title_color = "#8a94a6" if task.is_done else "#172033"
+        text_color = "#a0a8b5" if task.is_done else "#667085"
+        canvas.create_polygon(
+            self.round_rect_points(2, 2, width - 2, 80, 18),
+            smooth=True,
+            fill=fill,
+            outline="#d7deea",
+        )
+        canvas.create_polygon(
+            self.round_rect_points(2, 2, 9, 80, 18),
+            smooth=True,
+            fill=accent_fill,
+            outline="",
+        )
+        canvas.create_text(
+            28,
+            25,
+            text=task.title,
+            anchor="w",
+            fill=title_color,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        summary = task.description if task.description else "没有填写具体内容"
+        if len(summary) > 42:
+            summary = summary[:42] + "..."
+        canvas.create_text(
+            28,
+            54,
+            text=summary,
+            anchor="w",
+            fill=text_color,
+            font=("Microsoft YaHei UI", 9),
+        )
+        if task.is_done:
+            canvas.create_polygon(
+                self.round_rect_points(width - 86, 22, width - 20, 52, 13),
+                smooth=True,
+                fill="#e5e8ef",
+                outline="",
+            )
+            canvas.create_text(
+                width - 53,
+                37,
+                text="已完成",
+                fill="#7a8599",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+
+    def destroy_drag_preview(self) -> None:
+        if self.drag_preview and self.drag_preview.winfo_exists():
+            self.drag_preview.destroy()
+        self.drag_preview = None
+        self.drag_preview_canvas = None
+
+    @staticmethod
+    def round_rect_points(x1, y1, x2, y2, radius) -> list[float]:
+        return [
+            x1 + radius,
+            y1,
+            x2 - radius,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + radius,
+            x2,
+            y2 - radius,
+            x2,
+            y2,
+            x2 - radius,
+            y2,
+            x1 + radius,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - radius,
+            x1,
+            y1 + radius,
+            x1,
+            y1,
+        ]
 
     def on_canvas_resize(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.cards_window, width=event.width)
