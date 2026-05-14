@@ -5,7 +5,7 @@
 ## 运行
 
 ```powershell
-cd F:\python\daily_memo_app
+cd .\daily_memo_app
 python main.py
 ```
 
@@ -25,7 +25,7 @@ python main.py
 ## 数据位置
 
 ```text
-F:\python\daily_memo_app\data\daily_memo.db
+.\daily_memo_app\data\daily_memo.db
 ```
 
 ## 打包
